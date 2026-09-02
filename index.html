@@ -318,13 +318,38 @@ function makeBlankMonth(y,m,previousState){
     days:Array.from({length:31},(_,i)=>({day:i+1}))
   };
 }
+function syncIcOpeningAndClearStaleMonthEnd(monthState,all){
+  if(!monthState||!monthState.days)return monthState;
+  const p=previousMonthYM(monthState.year,monthState.month);
+  const prev=all[monthKey(p.year,p.month)]||null;
+  if(prev&&prev.days){
+    const carry=icNextCarryFromState(prev);
+    monthState.settings=monthState.settings||{};
+    monthState.settings.icOpeningCount=carry.count;
+    monthState.settings.icOpeningAmount=carry.amount;
+  }
+  // 過去版のテンプレート固定値・自動候補が月末日に残っている場合は、
+  // 利用者が手入力した印（icProcessManual）がない限り空欄へ戻す。
+  const last=monthDaysForState(monthState);
+  const r=(monthState.days||[]).find(x=>Number(x.day)===Number(last));
+  if(r&&!r.icProcessManual){
+    r.icProcessCount=null;
+    r.icProcessAmount=null;
+  }
+  return monthState;
+}
 function loadOrCreateMonth(y,m){
   const all=readMonthStore();
   const k=monthKey(y,m);
-  if(all[k]&&all[k].days)return clone(all[k]);
+  if(all[k]&&all[k].days){
+    const existing=syncIcOpeningAndClearStaleMonthEnd(clone(all[k]),all);
+    all[k]=clone(existing);
+    writeMonthStore(all);
+    return existing;
+  }
   const p=previousMonthYM(y,m);
   const prev=all[monthKey(p.year,p.month)]||null;
-  const created=makeBlankMonth(y,m,prev);
+  const created=syncIcOpeningAndClearStaleMonthEnd(makeBlankMonth(y,m,prev),all);
   all[k]=clone(created);
   writeMonthStore(all);
   return created;
@@ -419,14 +444,23 @@ function updateMealRemainingBudgetDisplay(){
 function mealUsageParts(){const r=dayObj(selectedDay);let raw=String(r.mealDate||'').replace(/　/g,' ').trim();let parts=raw?raw.split(/\s+/).filter(Boolean).slice(0,3):[];while(parts.length<3)parts.push('');return `<div class="meal-usage-block"><label class="meal-usage-label">購入分の使用日</label><div class="meal-usage-row">${parts.map((p,i)=>`<input class="meal-usage-input" data-meal-part="${i}" type="text" value="${esc(p.replace(/分$/,''))}" placeholder="例 8/15${i===0?'～8/19':''}">`).join('')}</div><div class="hint">1日ずつ入力：8/15・8/16・8/17　／　期間入力：8/15～8/19　※「分」は自動で付きます。</div></div>`}
 
 function monthEndProcessCandidate(kind){
+  // 月末処理の対象は「最終日の前日終了時点まで」のIC残高。
+  // 最終日当日の拾得分は月末処理後に残り、そのまま翌月繰越⑥へ加算される。
   const last=daysInMonth();
+  const endDay=Math.max(0,last-1);
   if(kind==='count'){
     let total=n(state.settings&&state.settings.icOpeningCount);
-    for(let d=1;d<=last;d++){const r=dayObj(d);total+=n(r.icCount)-n(r.icReturnCount);}
+    for(let d=1;d<=endDay;d++){
+      const r=dayObj(d);
+      total+=n(r.icCount)-n(r.icProcessCount)-n(r.icReturnCount);
+    }
     return total;
   }
   let total=n(state.settings&&state.settings.icOpeningAmount);
-  for(let d=1;d<=last;d++){const r=dayObj(d);total+=n(r.icAmount)-n(r.icReturnAmount);}
+  for(let d=1;d<=endDay;d++){
+    const r=dayObj(d);
+    total+=n(r.icAmount)-n(r.icProcessAmount)-n(r.icReturnAmount);
+  }
   return total;
 }
 
@@ -435,11 +469,11 @@ function monthEndHandlerPrintText(){
   const r=dayObj(daysInMonth());
   const names=[r.icMonthEndHandler1||'',r.icMonthEndHandler2||''].filter(Boolean).join('・');
   if(!names)return '';
-  return `${twoMonthsPriorRange()}　担当：${names}`;
+  return `${previousMonthRange()}　担当：${names}`;
 }
-function twoMonthsPriorRange(){
+function previousMonthRange(){
   const y=Number(state.year), m=Number(state.month);
-  let d=new Date(y,m-3,1);
+  let d=new Date(y,m-2,1);
   const yy=d.getFullYear(), mm=d.getMonth()+1;
   const last=new Date(yy,mm,0).getDate();
   return `${mm}/1～${mm}/${last}`;
@@ -447,20 +481,20 @@ function twoMonthsPriorRange(){
 function monthEndProcessBlock(){
   if(selectedDay!==daysInMonth())return '';
   const r=dayObj(selectedDay);
-  const cnt=(r.icProcessCount==null||r.icProcessCount==='')?monthEndProcessCandidate('count'):r.icProcessCount;
-  const amt=(r.icProcessAmount==null||r.icProcessAmount==='')?monthEndProcessCandidate('amount'):r.icProcessAmount;
+  const cnt=(r.icProcessCount==null||r.icProcessCount==='')?'':r.icProcessCount;
+  const amt=(r.icProcessAmount==null||r.icProcessAmount==='')?'':r.icProcessAmount;
   return `<div class="monthend-ic-box" style="margin-top:12px;padding:12px;border:1px solid #ccd5e0;border-radius:10px;background:#f7f9fc">
     <div style="font-weight:900;margin-bottom:8px">月末処理（最終日のみ）</div>
     <div class="grid">
-      <div class="field"><label>④ 処理枚数（自動候補・変更可）</label><input data-key="icProcessCount" type="number" value="${esc(cnt)}"></div>
-      <div class="field"><label>④ 処理 合計金額（円）（自動候補・変更可）</label><input data-key="icProcessAmount" type="number" value="${esc(amt)}"></div>
+      <div class="field"><label>④ 処理枚数</label><input data-key="icProcessCount" type="number" value="${esc(cnt)}"></div>
+      <div class="field"><label>④ 処理 合計金額（円）</label><input data-key="icProcessAmount" type="number" value="${esc(amt)}"></div>
     </div>
-    <div class="hint">月末日の④処理枚数・④処理金額へ反映します。表示された候補値は必要に応じて修正できます。</div>
+    <div class="hint">④処理枚数・④処理金額は実際に月末処理した数値を入力してください。翌月繰越⑥は「前日までの累計－月末日の④処理＋月末日当日の拾得－月末日当日の返却」で自動計算されます。</div>
   
     <div style="margin-top:12px;padding-top:12px;border-top:1px dashed #ccd5e0">
-      <div style="font-weight:900;margin-bottom:8px">先々月分の月末処理担当</div>
+      <div style="font-weight:900;margin-bottom:8px">先月分の月末処理担当</div>
       <div class="grid">
-        <div class="field"><label>対象期間（自動）</label><input type="text" value="${twoMonthsPriorRange()}" readonly style="background:#f3f5f7;color:#555"></div>
+        <div class="field"><label>対象期間（自動）</label><input type="text" value="${previousMonthRange()}" readonly style="background:#f3f5f7;color:#555"></div>
         <div class="field"><label>担当者①</label><input data-key="icMonthEndHandler1" type="text" value="${esc(r.icMonthEndHandler1||'')}" placeholder="氏名"></div>
         <div class="field"><label>担当者②</label><input data-key="icMonthEndHandler2" type="text" value="${esc(r.icMonthEndHandler2||'')}" placeholder="氏名"></div>
       </div>
@@ -534,14 +568,10 @@ ${DOREI.map((x,i)=>{
 
 </div>`;
  bindInput();updateMealRemainingBudgetDisplay();updatePotatoMonthTotalDisplay();}
-function bindInput(){document.getElementById('dateInput').onchange=e=>{const dt=new Date(e.target.value+'T00:00:00');switchToDate(dt.getFullYear(),dt.getMonth()+1,dt.getDate())};document.getElementById('holidayToggle').onchange=e=>{if(e.target.checked){if(!isHoliday(selectedDay))state.holidays.push(selectedDay)}else state.holidays=state.holidays.filter(x=>x!==selectedDay);state.holidays.sort((a,b)=>a-b);persist();renderInput()};document.querySelectorAll('[data-key]').forEach(el=>el.oninput=e=>{let v=e.target.value;if(e.target.type==='number')v=v===''?null:Number(v);dayObj(selectedDay)[e.target.dataset.key]=v;document.getElementById('saved').textContent='未保存';if(e.target.dataset.key==='receiptAmount'||e.target.dataset.key==='mealBudgetUsers')updateMealRemainingBudgetDisplay();if(e.target.dataset.key==='cafe100Cum'||e.target.dataset.key==='cafe120Cum')updateCafePeriodDisplay();if(e.target.dataset.key==='potatoWaste')updatePotatoMonthTotalDisplay();});document.querySelectorAll('[data-meal-part]').forEach(el=>el.oninput=()=>{const vals=[...document.querySelectorAll('[data-meal-part]')].map(x=>x.value.trim()).filter(Boolean).map(v=>v.replace(/分$/,'')+'分');dayObj(selectedDay).mealDate=vals.join('　')||null;document.getElementById('saved').textContent='未保存';})}
+function bindInput(){document.getElementById('dateInput').onchange=e=>{const dt=new Date(e.target.value+'T00:00:00');switchToDate(dt.getFullYear(),dt.getMonth()+1,dt.getDate())};document.getElementById('holidayToggle').onchange=e=>{if(e.target.checked){if(!isHoliday(selectedDay))state.holidays.push(selectedDay)}else state.holidays=state.holidays.filter(x=>x!==selectedDay);state.holidays.sort((a,b)=>a-b);persist();renderInput()};document.querySelectorAll('[data-key]').forEach(el=>el.oninput=e=>{let v=e.target.value;if(e.target.type==='number')v=v===''?null:Number(v);dayObj(selectedDay)[e.target.dataset.key]=v;if(e.target.dataset.key==='icProcessCount'||e.target.dataset.key==='icProcessAmount')dayObj(selectedDay).icProcessManual=true;document.getElementById('saved').textContent='未保存';if(e.target.dataset.key==='receiptAmount'||e.target.dataset.key==='mealBudgetUsers')updateMealRemainingBudgetDisplay();if(e.target.dataset.key==='cafe100Cum'||e.target.dataset.key==='cafe120Cum')updateCafePeriodDisplay();if(e.target.dataset.key==='potatoWaste')updatePotatoMonthTotalDisplay();});document.querySelectorAll('[data-meal-part]').forEach(el=>el.oninput=()=>{const vals=[...document.querySelectorAll('[data-meal-part]')].map(x=>x.value.trim()).filter(Boolean).map(v=>v.replace(/分$/,'')+'分');dayObj(selectedDay).mealDate=vals.join('　')||null;document.getElementById('saved').textContent='未保存';})}
 function ensureDays(){for(let d=1;d<=31;d++)if(!state.days.find(x=>x.day===d))state.days.push({day:d});state.holidays=state.holidays.filter(d=>d<=daysInMonth())}
 function saveDay(){if(selectedDay!==daysInMonth())dayObj(selectedDay).donation=0;
-  if(selectedDay===daysInMonth()){
-    const r=dayObj(selectedDay);
-    if(r.icProcessCount==null||r.icProcessCount==='')r.icProcessCount=monthEndProcessCandidate('count');
-    if(r.icProcessAmount==null||r.icProcessAmount==='')r.icProcessAmount=monthEndProcessCandidate('amount');
-  }
+
   persist();document.getElementById('saved').textContent='保存しました ✓';setTimeout(()=>document.getElementById('saved').textContent='',2200);
 }
 function showReports(){document.getElementById('overlay').classList.add('open');renderTabs();renderReport()}
@@ -715,6 +745,19 @@ function renderExcelTemplate(key){const t=XL_TEMPLATES[key], values={}, formulas
  if(key==='ic'){
    values['B6']=n(state.settings&&state.settings.icOpeningCount);
    values['C6']=n(state.settings&&state.settings.icOpeningAmount);
+   // ICの処理・返却値はテンプレートの旧固定値ではなく、実際の入力値を式計算前に反映する。
+   // これにより当日累計・翌月繰越⑥・計⑦が同じ入力値を基準に計算される。
+   // 1～31日すべての処理・返却セルを実データで上書きする。
+   // 30日以下の月では存在しない31日行にも旧テンプレート固定値(45枚/26,900円)があるため、必ず空欄化する。
+   for(let d=1;d<=31;d++){
+     const row=7+d;
+     const valid=d<=daysInMonth();
+     const rd=valid?dayObj(d):null;
+     values['F'+row]=(valid&&rd&&rd.icProcessCount!=null&&rd.icProcessCount!=='')?n(rd.icProcessCount):'';
+     values['G'+row]=(valid&&rd&&rd.icProcessAmount!=null&&rd.icProcessAmount!=='')?n(rd.icProcessAmount):'';
+     values['J'+row]=(valid&&rd&&rd.icReturnCount!=null&&rd.icReturnCount!=='')?n(rd.icReturnCount):'';
+     values['K'+row]=(valid&&rd&&rd.icReturnAmount!=null&&rd.icReturnAmount!=='')?n(rd.icReturnAmount):'';
+   }
  }
  // holiday-aware cafe cumulative before evaluating formulas
  if(key==='cafe'){for(const c of t.cells){if(typeof c.v==='string'&&c.v.includes('入力用!')){const m=c.v.match(/入力用!\$?([PQ])\$?(\d+)/);if(m){const day=Number(m[2])-2;if(isHoliday(day))values[c.coord]=prevCafe(day,m[1]==='P'?'cafe100Cum':'cafe120Cum')}}}}
@@ -776,7 +819,14 @@ if(key==='meal2'&&daysInMonth()===31){
 if((key==='meal1'||key==='meal2')&&c.coord==='C2')st+=';white-space:nowrap!important;font-size:14pt!important;text-align:left!important';
 if(key==='meal1'&&c.coord==='M2')st+=';font-size:18pt!important;font-weight:700!important';
 if(key==='meal1'&&c.coord==='Q2')st+=';font-size:19pt!important;font-weight:700!important';
-if(key==='ic'){const rr=rowNumber(c.coord),cc=colLetter(c.coord);const reportDay=rr-7;if(reportDay===daysInMonth()&&(cc==='F'||cc==='G')){const rd=dayObj(reportDay);val=cc==='F'?((rd.icProcessCount==null||rd.icProcessCount==='')?monthEndProcessCandidate('count'):rd.icProcessCount):((rd.icProcessAmount==null||rd.icProcessAmount==='')?monthEndProcessCandidate('amount'):rd.icProcessAmount);}
+if(key==='ic'){const rr=rowNumber(c.coord),cc=colLetter(c.coord);const reportDay=rr-7;
+// 処理欄は1～31日すべて実入力のみ表示。存在しない日や未入力日は空欄にする。
+if(reportDay>=1&&reportDay<=31&&(cc==='F'||cc==='G')){
+  if(reportDay<=daysInMonth()){
+    const rd=dayObj(reportDay);
+    val=cc==='F'?((rd.icProcessCount==null||rd.icProcessCount==='')?'':rd.icProcessCount):((rd.icProcessAmount==null||rd.icProcessAmount==='')?'':rd.icProcessAmount);
+  }else val='';
+}
 if(reportDay>=1&&reportDay<=daysInMonth()&&(cc==='H'||cc==='I'||cc==='J')){const rd=dayObj(reportDay);if(cc==='H')val=rd.icReturnCount||'';if(cc==='I')val=rd.icReturnAmount||'';if(cc==='J')val=rd.icReturnNote||'';}
 if(reportDay===daysInMonth()-1&&(['F','G','H'].includes(cc))){
   const t=monthEndHandlerPrintText();
@@ -1141,6 +1191,6 @@ function download(name,text,type){
   setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1500);
 }
 document.getElementById('saveBtn').onclick=saveDay;document.getElementById('reportsBtn').onclick=showReports;document.getElementById('closeBtn').onclick=()=>document.getElementById('overlay').classList.remove('open');document.getElementById('todayBtn').onclick=()=>{const t=new Date();switchToDate(t.getFullYear(),t.getMonth()+1,t.getDate())};document.getElementById('printBtn').onclick=()=>window.print();document.getElementById('xlsxBtn').onclick=()=>doreiExcelExport();document.getElementById('backupBtn').onclick=()=>download(`業務入力バックアップ_${state.year}_${String(state.month).padStart(2,'0')}.json`,JSON.stringify(state,null,2),'application/json');document.getElementById('restoreInput').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{try{const x=JSON.parse(rd.result);if(!x.days)throw 0;state=x;persist();selectedDay=1;renderInput();renderReport();alert('復元しました')}catch(err){alert('バックアップを読み込めませんでした')}};rd.readAsText(f)};
-ensureDays();saveMonthArchive();renderInput();
+state=syncIcOpeningAndClearStaleMonthEnd(state,readMonthStore()); localStorage.setItem(KEY,JSON.stringify(state)); ensureDays();saveMonthArchive();renderInput();
 </script>
 </body></html>
